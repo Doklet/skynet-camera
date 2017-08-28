@@ -17,7 +17,7 @@ set(EIXX_LIBS
   pthread
 )
 
-file(GLOB skynetCameraSources *.cpp)
+file(GLOB skynetCameraSources *.cpp *.c)
 file(GLOB skynetCameraIncludes *.h )
 
 cuda_add_executable(skynet-camera ${skynetCameraSources})

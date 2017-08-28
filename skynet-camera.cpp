@@ -17,9 +17,12 @@
 #include <pthread.h>
 
 #include "CommHandler.h"
+#include "DigitalIO.h"
+
 #include "cudaNormalize.h"
 #include "cudaFont.h"
 #include "imageNet.h"
+#include "loadImage.h"
 
 
 #define DEFAULT_CAMERA -1	// -1 for onboard camera, or change to index of /dev/video V4L2 camera (>=0)	
@@ -63,6 +66,8 @@ int main( int argc, char** argv )
 	/* Set up command handler in wown thread*/
 
 	CommandHandler* commandHandler = new CommandHandler();
+	
+	DigitalIO io;
 
 	pthread_t t;
 	
@@ -71,6 +76,9 @@ int main( int argc, char** argv )
 	std::cout << "Await commands \n" << std::endl;
 	
 
+	/* setup the IO's */
+	io.Init();
+	
 	/*
 	 * attach signal handler
 	 */
@@ -147,6 +155,15 @@ int main( int argc, char** argv )
 	 * processing loop
 	 */
 	float confidence = 0.0f;
+
+	/*
+	 * set system ready output
+	 */
+	io.ClearSystemReady();
+	io.ClearGood();
+	io.ClearBad();	
+
+	io.SetSystemReady();
 	
 	while( !signal_recieved )
 	{
@@ -162,15 +179,47 @@ int main( int argc, char** argv )
 		// convert from YUV to RGBA
 		void* imgRGBA = NULL;
 		
-		if( !camera->ConvertRGBA(imgCUDA, &imgRGBA) )
+		if( !camera->ConvertRGBA(imgCUDA, &imgRGBA, true) )
 			printf("imagenet-camera:  failed to convert from NV12 to RGBA\n");
 
 		// classify image
 		const int img_class = net->Classify((float*)imgRGBA, camera->GetWidth(), camera->GetHeight(), &confidence);
+
+		/*
+		 * Handle any incomming command  
+		 */
+		if (Command* cmd = commandHandler->GetNextCommand()) {
+			switch (cmd->type) {
+				case RECORD:
+				{
+					std::cout << "Got a record command\n";
+					//std::cout << "recordPath: " << cmd->recordCommand->recordPath << std::endl;
+					std::cout << "Before check\n";
+					const char *outputfile = "skynet_output.jpg";
+					if( !saveImageRGBA(outputfile, (float4*)imgRGBA, camera->GetWidth(), camera->GetHeight()) )
+						printf("imagenet-console:  failed to save output image to '%s'\n", outputfile);
+					else
+						printf("imagenet-console:  completed saving '%s'\n", outputfile);
+					break;
+					break;
+				}
+				case PREDICT:
+				{
+					std::cout << "Got a predict command:\n" << std::endl;
+					std::cout << "filePath: " << cmd->predictCommand->filePath << "\n";
+					break;
+				}
+				default:
+					std::cout << "Got a unkown command" << "\n";
+			}
+
+			// TODO need to fix this, crash on TX1
+			// delete cmd;
+		}
 	
 		if( img_class >= 0 )
 		{
-			printf("imagenet-camera:  %2.5f%% class #%i (%s)\n", confidence * 100.0f, img_class, net->GetClassDesc(img_class));	
+			// printf("imagenet-camera:  %2.5f%% class #%i (%s)\n", confidence * 100.0f, img_class, net->GetClassDesc(img_class));	
 
 			if( font != NULL )
 			{
@@ -178,8 +227,9 @@ int main( int argc, char** argv )
 				sprintf(str, "%05.2f%% %s", confidence * 100.0f, net->GetClassDesc(img_class));
 	
 				font->RenderOverlay((float4*)imgRGBA, (float4*)imgRGBA, camera->GetWidth(), camera->GetHeight(),
-								    str, 0, 0, make_float4(255.0f, 255.0f, 255.0f, 255.0f));
+								    str, 0, 0, make_float4(0.0f, 255.0f, 255.0f, 255.0f));
 			}
+			
 			
 			if( display != NULL )
 			{
@@ -187,7 +237,19 @@ int main( int argc, char** argv )
 				sprintf(str, "TensorRT build %x | %s | %s | %04.1f FPS", NV_GIE_VERSION, net->GetNetworkName(), net->HasFP16() ? "FP16" : "FP32", display->GetFPS());
 				//sprintf(str, "TensorRT build %x | %s | %04.1f FPS | %05.2f%% %s", NV_GIE_VERSION, net->GetNetworkName(), display->GetFPS(), confidence * 100.0f, net->GetClassDesc(img_class));
 				display->SetTitle(str);	
-			}	
+			}
+			
+			// Set the correct io's
+			if (img_class == 0) {
+				io.SetGood();
+				io.ClearBad();	
+			} else if (img_class == 1) {
+				io.ClearGood();
+				io.SetBad();	
+			} else {
+				io.ClearGood();
+				io.ClearBad();	
+			}
 		}	
 
 
@@ -219,8 +281,14 @@ int main( int argc, char** argv )
 
 			display->EndRender();
 		}
+
+
 	}
 	
+	io.ClearSystemReady();
+	io.ClearGood();
+	io.ClearBad();	
+
 	printf("\nimagenet-camera:  un-initializing video device\n");
 	
 	
@@ -238,6 +306,9 @@ int main( int argc, char** argv )
 		delete display;
 		display = NULL;
 	}
+	
+	/* shutdown the IO's */
+	io.Shutdown();
 	
 	printf("imagenet-camera:  video device has been un-initialized.\n");
 	printf("imagenet-camera:  this concludes the test of the video device.\n");
